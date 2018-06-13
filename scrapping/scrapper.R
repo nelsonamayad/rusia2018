@@ -5,7 +5,7 @@ library(purrr)
 library(dplyr)
 library(feather)
 
-extract_result_data <- function(result_node) {
+extract_result_match <- function(result_node) {
   date <- result_node %>% html_node('.mu-i-date') %>% html_text() %>% dmy()
   home_team <- result_node %>% html_node('.t.home') %>% html_node('.t-nText') %>% html_text()  
   away_team <- result_node %>% html_node('.t.away') %>% html_node('.t-nText') %>% html_text() 
@@ -18,7 +18,7 @@ extract_result_data <- function(result_node) {
 }
 
 get_results <- function(url){
-  url %>% read_html() %>% html_nodes('.mu.result') %>% map(extract_result_data) %>% bind_rows()
+  url %>% read_html() %>% html_nodes('.mu.result') %>% map(extract_result_match) %>% bind_rows()
 }
 
 urls <- c('https://www.fifa.com/worldcup/preliminaries/southamerica/all-matches.html', 
