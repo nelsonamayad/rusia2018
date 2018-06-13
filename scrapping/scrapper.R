@@ -3,7 +3,7 @@ library(stringr)
 library(lubridate)
 library(purrr)
 library(dplyr)
-
+library(feather)
 extract_result_data <- function(result_node) {
   date <- result_node %>% html_node('.mu-i-date') %>% html_text() %>% dmy()
   
@@ -30,3 +30,6 @@ urls <- c('https://www.fifa.com/worldcup/preliminaries/southamerica/all-matches.
 
 results <- urls %>% map(get_results) %>% bind_rows()
 
+path <- 'preliminaries.feather'
+
+feather::write_feather(results, path)
