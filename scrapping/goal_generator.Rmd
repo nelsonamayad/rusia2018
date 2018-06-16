@@ -1,0 +1,220 @@
+---
+title: "Goal Generator"
+output: html_notebook
+---
+
+```{r}
+set.seed(13)
+N <- 10
+team <- 1:10
+offensive <- abs(rnorm(N, 0.5, 0.1))
+defensive <- abs(rnorm(N, 0.5, 0.1))
+team_df <- data.frame(team, offensive, defensive)
+team_df
+```
+
+```{r}
+goals <- function(offensive, defensive) {
+  theta <- offensive / (defensive + offensive)
+  lambda <- offensive / defensive
+  return(rbinom(size=1, prob=theta, n=1) * rpois(n=1, lambda=lambda))
+}
+```
+
+```{r}
+set.seed(10)
+games <- 100
+tournament <- as.data.frame(t(replicate(games, sample(1:N, size = 2, replace = F)))) %>% rename(T1=V1, T2=V2) %>% inner_join(team_df, by = c('T1'='team')) %>%
+  rename(offensive1=offensive, defensive1=defensive) %>%
+  inner_join(team_df, by = c('T2'='team')) %>%
+  rename(offensive2=offensive, defensive2=defensive) %>% mutate(goals1=Vectorize(goals)(offensive1, defensive2)) %>%
+  mutate(goals2=Vectorize(goals)(offensive2, defensive1)) 
+tournament 
+```
+
+```{r}
+
+data <- list(T=N, G=games, A=tournament$T1, B=tournament$T2, 
+             GA=tournament$goals1, GB=tournament$goals2)
+
+model_code <- "
+data {
+  int<lower=0> T;
+  int<lower=0> G;
+  int<lower=0, upper=T> A[G];
+  int<lower=0, upper=T> B[G];
+  int<lower=0> GA[G];
+  int<lower=0> GB[G];
+}
+
+parameters {
+  real<lower=0> offensive[T];
+  real<lower=0> defensive[T];
+}
+
+model {
+  real lambdaA;
+  real lambdaB;
+  real thetaA;
+  real thetaB;
+  offensive ~ normal(0.5, 0.2);
+  defensive ~ normal(0.5, 0.3);
+  for (g in 1:G){
+    lambdaA = offensive[A[g]] / defensive[B[g]];
+    thetaA = offensive[A[g]] / (offensive[A[g]] + defensive[B[g]]);
+    lambdaB = offensive[B[g]] / defensive[A[g]];
+    thetaB = offensive[B[g]] / (offensive[B[g]] + defensive[A[g]]);
+
+    if (GA[g] == 0) {
+      target += log_sum_exp(bernoulli_lpmf(0 | thetaA),
+                            bernoulli_lpmf(1 | thetaA)
+                            + poisson_lpmf(GA[g] | lambdaA));
+    }
+    else {
+      target += bernoulli_lpmf(1 | thetaA) + poisson_lpmf(GA[g] | lambdaA);
+    }
+
+    if (GB[g] == 0) {
+      target += log_sum_exp(bernoulli_lpmf(0 | thetaB),
+                            bernoulli_lpmf(1 | thetaB)
+                            + poisson_lpmf(GB[g] | lambdaB));
+    }
+    else {
+      target += bernoulli_lpmf(1 | thetaB) + poisson_lpmf(GA[g] | lambdaB);
+    }
+  }
+}
+"
+```
+
+```{r}
+library(rstan)
+```
+
+```{r}
+fit <- stan(model_code = model_code, data = data, iter = 1000, chains = 1)
+```
+
+```{r}
+real_fit <- stan(fit=fit, data=data, iter=4000, chains=4)
+```
+
+```{r}
+print(real_fit)
+```
+
+```{r}
+plot(real_fit)
+```
+
+```{r}
+clasificatoria <- feather::read_feather('preliminaries.feather')
+```
+
+
+```{r}
+torneo = clasificatoria
+equipos = sort(unique(c(torneo$home_team, torneo$away_team)))
+codigos = data.frame(team=equipos, codigo=1:length(equipos))
+
+torneo
+```
+
+
+```{r}
+torneo_datos = torneo %>% inner_join(codigos, by=c('home_team'='team')) %>% rename(T1=codigo) %>%
+  inner_join(codigos, by=c('away_team'='team')) %>% rename(T2=codigo) %>%
+  select(T1, T2, home_goals, away_goals)
+```
+
+```{r}
+data_real <- list(T=nrow(codigos), G=nrow(torneo), A=torneo_datos$T1, B=torneo_datos$T2, 
+             GA=torneo_datos$home_goals, GB=torneo_datos$away_goals)
+
+```
+
+```{r}
+true_fit <- stan(fit=fit, data=data_real, iter=10000, chains=4)
+
+```
+
+
+```{r}
+dists <- rstan::extract(true_fit)
+estimations <- rbind(as.data.frame(dists$offensive) %>% mutate(iteration=1:n()) %>% gather(team, score, -iteration) %>% mutate(team=as.numeric(str_replace(team, 'V', '')), type='offensive'), as.data.frame(dists$defensive) %>% mutate(iteration=1:n()) %>% gather(team, score, -iteration) %>% mutate(team=as.numeric(str_replace(team, 'V', '')), type='defensive')) 
+```
+
+```{r}
+world_cup_countries <- c('Argentina', 'Australia', 'Belgium', 'Brazil', 'Colombia',' Costa Rica', 'Croatia', 'Denmark',
+'Egypt', 'England', 'France', 'Germany', 'Iceland', 'IR Iran', 'Japan', 'Korea Republic', 'Mexico',
+'Morocco', 'Nigeria', 'Panama', 'Peru', 'Poland', 'Portugal', 'Russia', 'Saudi Arabia', 'Senegal', 
+'Serbia', 'Spain', 'Sweden', 'Switzerland', 'Tunisia', 'Uruguay')
+
+relevant_scores <- codigos %>% filter(team %in% world_cup_countries) %>% rename(country=team) %>% rename(team=codigo) %>% inner_join(estimations) %>% select(country, iteration, score, type)
+```
+
+```{r}
+aggregated_scores <- relevant_scores %>% group_by(country, type) %>% summarise(min_score = quantile(score, 0.1), max_score = quantile(score, 0.9), score = median(score)) %>% ungroup()
+
+plot_scores <- aggregated_scores %>% inner_join(aggregated_scores %>% 
+                                                  filter(type=='offensive') %>%
+                                                  rename(index_score=score) %>%
+                                                  select(country, index_score)) %>%
+  ggplot(aes(fct_reorder(country, index_score), score)) +
+  geom_linerange(aes(ymin=min_score, ymax=max_score), color='grey70') +
+  geom_point(color='orangered') +
+  facet_grid(~type) +
+  coord_cartesian(xlim = c(0, 1)) +
+  coord_flip() +  xlab('country') + ylab('') + theme_minimal()
+plot_scores
+```
+
+```{r}
+game_simulation <- function(country_a, country_b){
+country_a_goals <- Vectorize(goals)((relevant_scores %>% 
+                    filter(country==country_a, type=='offensive'))$score, 
+                 (relevant_scores %>% 
+                   filter(country==country_b, type=='defensive'))$score)
+
+country_b_goals <- Vectorize(goals)((relevant_scores %>% 
+                    filter(country==country_b, type=='offensive'))$score, 
+                 (relevant_scores %>% 
+                   filter(country==country_a, type=='defensive'))$score)
+                           
+return(data.frame(country_a=country_a_goals, country_b=country_b_goals) %>%
+         setNames(c(country_a, country_b)))}
+```
+
+```{r}
+goal_difference_estimation <- function(country_a, country_b){
+  games <- game_simulation(country_a, country_b) 
+  
+  diferencias <- games %>% as.matrix() %*% as.matrix(c(1, -1)) %>% as.data.frame
+  
+  probabilidades <- diferencias %>% 
+    mutate(gana_a = V1 > 0, empatan=V1 ==0, gana_b=V1 < 0) %>%
+    select(-V1) %>% setNames(c(country_a, 'Empatan', country_b)) %>% 
+    colMeans %>% as.list
+  
+  label <- paste('Probabilities\n',  country_a, ' wins: ', probabilidades[country_a],
+                 '\n', country_b, ' wins: ', probabilidades[country_b], '\nTie: ',
+                 probabilidades['Empatan'], sep='')
+  
+  plot <- diferencias %>% rename(diferencia=V1) %>% 
+    ggplot(aes(diferencia)) +
+    geom_histogram(binwidth = 1, fill='grey80') +
+    xlab(paste('Goal difference favouring', country_a)) + 
+    ylab('Simulaciones') +
+    annotate("text", x = 1, y = 5000, label = label, hjust=0) + 
+    theme_minimal() 
+
+  return(list(plot=plot, games=games, diferencias=diferencias))
+}
+```
+
+```{r}
+country_a <- 'Iceland'
+country_b <- 'Argentina'
+ggsave('argentina_iceland.png', 
+       goal_difference_estimation(country_a, country_b)$plot, width = 8, height = 5)
+```
